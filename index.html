@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Otimizador BackEnd</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="container">
+    <header class="topo">
+      <h1>Otimizador <span>BackEnd</span></h1>
+      <p>Cole seu script SQL e gere um back-end Node + Express + MySQL com a coleção do Insomnia.</p>
+    </header>
+
+    <section class="card">
+      <label for="sql-input">Script SQL</label>
+      <textarea
+        id="sql-input"
+        spellcheck="false"
+        placeholder="CREATE DATABASE loja;&#10;&#10;CREATE TABLE produtos (&#10;  id INT AUTO_INCREMENT PRIMARY KEY,&#10;  nome VARCHAR(100) NOT NULL,&#10;  preco DECIMAL(10,2) NOT NULL&#10;);"
+      ></textarea>
+      <div class="acoes">
+        <button type="button" class="btn btn-primario" onclick="gerarBackend()">Gerar back-end</button>
+      </div>
+    </section>
+
+    <section id="output-section" class="card">
+      <div class="saida-topo">
+        <label>Comando para o PowerShell</label>
+        <div class="acoes">
+          <button type="button" id="btn-copy" class="btn btn-primario" onclick="copiarComando()">Copiar Comando</button>
+          <button type="button" class="btn btn-secundario" onclick="baixarScript()">Baixar .ps1</button>
+        </div>
+      </div>
+      <pre id="terminal-output"></pre>
+      <p class="dica">
+        Abra o PowerShell na pasta do projeto, cole o comando e, depois, rode
+        <code>npm run dev</code>. O script do banco fica em <code>config/script.sql</code>.
+      </p>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
