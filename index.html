@@ -27,16 +27,17 @@
 
     <section id="output-section" class="card">
       <div class="saida-topo">
-        <label>Comando para o PowerShell</label>
+        <label for="terminal-output">Comando para o PowerShell</label>
         <div class="acoes">
           <button type="button" id="btn-copy" class="btn btn-primario" onclick="copiarComando()">Copiar Comando</button>
-          <button type="button" class="btn btn-secundario" onclick="baixarScript()">Baixar .ps1</button>
         </div>
       </div>
+      <p id="resumo" class="dica"></p>
       <pre id="terminal-output"></pre>
       <p class="dica">
-        Abra o PowerShell na pasta do projeto, cole o comando e, depois, rode
-        <code>npm run dev</code>. O script do banco fica em <code>config/script.sql</code>.
+        Abra o PowerShell numa pasta vazia, cole o comando e rode
+        <code>npm run db</code> (cria o banco a partir de <code>config/script.sql</code>)
+        e depois <code>npm run dev</code>. Importe <code>insomnia.json</code> no Insomnia para testar as rotas.
       </p>
     </section>
   </main>

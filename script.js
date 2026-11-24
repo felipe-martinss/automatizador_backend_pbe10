@@ -1,462 +1,365 @@
+/* ==========================================================
+   Otimizador BackEnd — gera um CRUD Node + Express + MySQL
+   a partir de um script SQL, com coleção do Insomnia.
+   ========================================================== */
 
-// ============================================================
-// Otimizador StatTrak — gerador de back-end (Node + Express + MySQL)
-// Estrutura gerada: config / controllers / models / routes
-// ============================================================
+/* ---------- 1. Leitura do SQL ---------- */
 
-let ultimoComando = '';
+function limparSql(sql) {
+  let saida = '';
+  let aspa = null;
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    const prox = sql[i + 1];
 
-// ---------- Utilitários ----------
+    if (aspa) {
+      saida += c;
+      if (c === '\\' && aspa !== '`') {
+        saida += prox ?? '';
+        i++;
+      } else if (c === aspa) {
+        aspa = null;
+      }
+      continue;
+    }
 
-// Envolve identificadores em crases
-const q = (nome) => '`' + nome + '`';
-
-// Base64 seguro para UTF-8
-function paraBase64(texto) {
-  const bytes = new TextEncoder().encode(texto);
-  let bin = '';
-  bytes.forEach((b) => (bin += String.fromCharCode(b)));
-  return btoa(bin);
+    if (c === "'" || c === '"' || c === '`') {
+      aspa = c;
+      saida += c;
+      continue;
+    }
+    if ((c === '-' && prox === '-' && /\s/.test(sql[i + 2] ?? ' ')) || c === '#') {
+      while (i < sql.length && sql[i] !== '\n') i++;
+      saida += '\n';
+      continue;
+    }
+    if (c === '/' && prox === '*') {
+      const fim = sql.indexOf('*/', i + 2);
+      i = fim === -1 ? sql.length : fim + 1;
+      saida += ' ';
+      continue;
+    }
+    saida += c;
+  }
+  return saida;
 }
 
-function removerComentarios(sql) {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '');
+function extrairParenteses(texto, indiceAbre) {
+  let nivel = 0;
+  let aspa = null;
+  for (let i = indiceAbre; i < texto.length; i++) {
+    const c = texto[i];
+    if (aspa) {
+      if (c === '\\' && aspa !== '`') i++;
+      else if (c === aspa) aspa = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { aspa = c; continue; }
+    if (c === '(') nivel++;
+    if (c === ')') {
+      nivel--;
+      if (nivel === 0) return { corpo: texto.slice(indiceAbre + 1, i), fim: i };
+    }
+  }
+  return null;
 }
 
-// Divide por vírgulas apenas no nível zero
-function dividirNivelZero(texto) {
+function dividirNoTopo(texto) {
   const partes = [];
   let atual = '';
   let nivel = 0;
-  let aspas = null;
-
-  for (const ch of texto) {
-    if (aspas) {
-      atual += ch;
-      if (ch === aspas) aspas = null;
+  let aspa = null;
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (aspa) {
+      atual += c;
+      if (c === '\\' && aspa !== '`') { atual += texto[i + 1] ?? ''; i++; }
+      else if (c === aspa) aspa = null;
       continue;
     }
-
-    if (ch === "'" || ch === '"' || ch === '`') {
-      aspas = ch;
-      atual += ch;
-      continue;
-    }
-
-    if (ch === '(') nivel++;
-    if (ch === ')') nivel--;
-
-    if (ch === ',' && nivel === 0) {
-      partes.push(atual.trim());
-      atual = '';
-      continue;
-    }
-
-    atual += ch;
+    if (c === "'" || c === '"' || c === '`') { aspa = c; atual += c; continue; }
+    if (c === '(') nivel++;
+    if (c === ')') nivel--;
+    if (c === ',' && nivel === 0) { partes.push(atual.trim()); atual = ''; continue; }
+    atual += c;
   }
-
   if (atual.trim()) partes.push(atual.trim());
-
   return partes;
 }
 
-// ---------- Parser do SQL ----------
-
-function analisarTabela(nome, corpo) {
-  const colunas = [];
-  const pks = [];
-
-  for (const parte of dividirNivelZero(corpo)) {
-
-    const pkTabela = parte.match(
-      /^(?:CONSTRAINT\s+\S+\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)/i
-    );
-
-    if (pkTabela) {
-      pkTabela[1].split(',').forEach((c) =>
-        pks.push(c.replace(/[`"\s]/g, ''))
-      );
-      continue;
-    }
-
-    if (/^(CONSTRAINT|FOREIGN|KEY|UNIQUE|INDEX|FULLTEXT|SPATIAL|CHECK)\b/i.test(parte)) {
-      continue;
-    }
-
-    const col = parte.match(/^[`"]?(\w+)[`"]?\s+(\w+)/);
-
-    if (!col) continue;
-
-    if (/PRIMARY\s+KEY/i.test(parte)) {
-      pks.push(col[1]);
-    }
-
-    colunas.push({
-      nome: col[1],
-      tipo: col[2],
-      auto: /AUTO_INCREMENT/i.test(parte),
-      notNull: /NOT\s+NULL/i.test(parte),
-      temDefault: /\bDEFAULT\b/i.test(parte)
-    });
-  }
-
-  const pk =
-    pks[0] ||
-    (colunas.find((c) => c.auto) || {}).nome ||
-    'id';
-
-  const insertaveis = colunas.filter((c) => !c.auto);
-
-  const atualizaveis = insertaveis.filter(
-    (c) => c.nome !== pk
-  );
-
-  const obrigatoria = (c) =>
-    !c.temDefault && (c.notNull || pks.includes(c.nome));
-
-  return {
-    nome,
-    pk,
-    colunas,
-    insertaveis,
-    atualizaveis,
-    obrigatoriosCriar: insertaveis.filter(obrigatoria).map((c) => c.nome),
-    obrigatoriosAtualizar: atualizaveis.filter(obrigatoria).map((c) => c.nome)
-  };
-}
-
-// ---------- Extrair tabelas ----------
-
 function extrairTabelas(sql) {
-  const limpo = removerComentarios(sql);
-
-  const cabecalho =
-    /CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`?\w+`?\.)?`?(\w+)`?\s*\(/gi;
-
+  const limpo = limparSql(sql);
+  const cabecalho = /CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`?\w+`?\s*\.\s*)?`?(\w+)`?\s*\(/gi;
   const tabelas = [];
   let m;
 
   while ((m = cabecalho.exec(limpo)) !== null) {
-    const inicio = cabecalho.lastIndex;
-    let i = inicio;
-    let nivel = 1;
-    let aspas = null;
+    const nome = m[1];
+    const abre = m.index + m[0].length - 1;
+    const bloco = extrairParenteses(limpo, abre);
+    if (!bloco) continue;
+    cabecalho.lastIndex = bloco.fim + 1;
 
-    for (; i < limpo.length && nivel > 0; i++) {
-      const ch = limpo[i];
+    const colunas = [];
+    let pkTabela = [];
 
-      if (aspas) {
-        if (ch === aspas) aspas = null;
+    for (const def of dividirNoTopo(bloco.corpo)) {
+      const mPk = def.match(/^(?:CONSTRAINT\s+`?\w+`?\s+)?PRIMARY\s+KEY\s*(?:\w+\s*)?\(([^)]+)\)/i);
+      if (mPk) {
+        pkTabela = mPk[1].split(',').map(s => s.replace(/`/g, '').trim().split(/[\s(]/)[0]);
         continue;
       }
+      if (/^(?:CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|KEY|INDEX|FULLTEXT|SPATIAL|CHECK)\b/i.test(def)) continue;
 
-      if (ch === "'" || ch === '"' || ch === '`') {
-        aspas = ch;
-      } else if (ch === '(') {
-        nivel++;
-      } else if (ch === ')') {
-        nivel--;
-      }
+      const mCol = def.match(/^`?(\w+)`?\s+(\w+)/);
+      if (!mCol) continue;
+
+      const tipo = mCol[2].toLowerCase();
+      const pkInline = /\bPRIMARY\s+KEY\b/i.test(def);
+      const autoInc = /\bAUTO_INCREMENT\b/i.test(def) || tipo === 'serial';
+      const gerada = /\bGENERATED\s+ALWAYS\b|\bAS\s*\(/i.test(def);
+      const mEnum = def.match(/\benum\s*\(([^)]*)\)/i);
+
+      colunas.push({
+        nome: mCol[1],
+        tipo,
+        pk: pkInline,
+        autoInc,
+        gerada,
+        notNull: /\bNOT\s+NULL\b/i.test(def) || pkInline,
+        temDefault: /\bDEFAULT\b/i.test(def),
+        enumValores: mEnum ? [...mEnum[1].matchAll(/'((?:[^'\\]|\\.|'')*)'/g)].map(x => x[1]) : []
+      });
     }
 
-    cabecalho.lastIndex = i;
+    pkTabela.forEach(p => {
+      const col = colunas.find(c => c.nome.toLowerCase() === p.toLowerCase());
+      if (col) { col.pk = true; col.notNull = true; }
+    });
 
-    tabelas.push(
-      analisarTabela(m[1], limpo.slice(inicio, i - 1))
-    );
+    const colPk = colunas.find(c => c.pk);
+    const campos = colunas.filter(c => !c.autoInc && !c.gerada);
+
+    tabelas.push({
+      nome,
+      chave: colPk ? colPk.nome : 'id',
+      campos: campos.map(c => c.nome),
+      obrigatorios: campos.filter(c => c.notNull && !c.temDefault).map(c => c.nome),
+      colunas
+    });
   }
-
   return tabelas;
 }
 
-// ---------- Geradores de arquivos ----------
-
-// Conexão com MySQL
-function gerarConfigDb(dbName) {
-  return `const mysql = require('mysql2/promise');
-
-const pool = mysql.createPool({
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: '${dbName}',
-  waitForConnections: true,
-  connectionLimit: 10
-});
-
-module.exports = pool;
-`;
+function extrairNomeBanco(sql) {
+  const limpo = limparSql(sql);
+  const criar = limpo.match(/CREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
+  if (criar) return criar[1];
+  const usar = limpo.match(/\bUSE\s+`?(\w+)`?/i);
+  return usar ? usar[1] : 'meu_banco';
 }
 
-// Model
-function gerarModel(tab) {
-  const t = q(tab.nome);
-  const pk = q(tab.pk);
+/* ---------- 2. Geração dos arquivos ---------- */
 
-  const cols = tab.insertaveis
-    .map((c) => q(c.nome))
-    .join(', ');
+function valorExemplo(col) {
+  const nome = col.nome.toLowerCase();
+  if (/mail/.test(nome)) return 'exemplo@email.com';
+  if (/senha|password/.test(nome)) return 'senha123';
+  if (col.enumValores.length) return col.enumValores[0];
 
-  const marks = tab.insertaveis
-    .map(() => '?')
-    .join(', ');
-
-  const sets = tab.atualizaveis
-    .map((c) => q(c.nome) + ' = ?')
-    .join(', ');
-
-  const valoresInsert = tab.insertaveis
-    .map((c) => `dados.${c.nome} ?? null`)
-    .join(', ');
-
-  const valoresUpdate = [
-    ...tab.atualizaveis.map((c) => `dados.${c.nome} ?? null`),
-    'id'
-  ].join(', ');
-
-  return `const db = require('../config/db');
-
-const listar = async () => {
-  const [rows] = await db.query('SELECT * FROM ${t}');
-  return rows;
-};
-
-const buscarPorId = async (id) => {
-  const [rows] = await db.query(
-    'SELECT * FROM ${t} WHERE ${pk} = ?',
-    [id]
-  );
-  return rows[0];
-};
-
-const criar = async (dados) => {
-  const [result] = await db.query(
-    'INSERT INTO ${t} (${cols}) VALUES (${marks})',
-    [${valoresInsert}]
-  );
-  return result.insertId;
-};
-
-const atualizar = async (id, dados) => {
-  const [result] = await db.query(
-    'UPDATE ${t} SET ${sets} WHERE ${pk} = ?',
-    [${valoresUpdate}]
-  );
-  return result.affectedRows;
-};
-
-const remover = async (id) => {
-  const [result] = await db.query(
-    'DELETE FROM ${t} WHERE ${pk} = ?',
-    [id]
-  );
-  return result.affectedRows;
-};
-
-module.exports = {
-  listar,
-  buscarPorId,
-  criar,
-  atualizar,
-  remover
-};
-`;
+  switch (col.tipo) {
+    case 'tinyint': case 'smallint': case 'mediumint':
+    case 'int': case 'integer': case 'bigint': case 'bit':
+    case 'bool': case 'boolean':
+      return 1;
+    case 'decimal': case 'numeric': case 'float': case 'double': case 'real':
+      return 10.5;
+    case 'date': return '2026-01-01';
+    case 'datetime': case 'timestamp': return '2026-01-01 12:00:00';
+    case 'time': return '12:00:00';
+    case 'year': return 2026;
+    case 'json': return {};
+    default: return 'exemplo';
+  }
 }
 
-// Controller
 function gerarController(tab) {
-  return `const model = require('../models/${tab.nome}');
+  const cols = tab.campos.join(', ');
+  const placeholders = tab.campos.map(() => '?').join(', ');
+  const updates = tab.campos.map(c => `${c} = ?`).join(', ');
 
-const OBRIGATORIOS_CRIAR = ${JSON.stringify(tab.obrigatoriosCriar)};
-const OBRIGATORIOS_ATUALIZAR = ${JSON.stringify(tab.obrigatoriosAtualizar)};
-
-const faltando = (body, lista) =>
-  lista.filter((c) =>
-    body[c] === undefined ||
-    body[c] === null ||
-    body[c] === ''
-  );
+  return `const db = require('../db');
 
 const listar = async (req, res) => {
   try {
-    res.json(await model.listar());
+    const [rows] = await db.query('SELECT * FROM ${tab.nome}');
+    res.json(rows);
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
 };
 
 const buscarPorId = async (req, res) => {
+  const { id } = req.params;
   try {
-    const registro = await model.buscarPorId(req.params.id);
-
-    if (!registro) {
-      return res.status(404).json({
-        erro: 'Registro não encontrado'
-      });
-    }
-
-    res.json(registro);
+    const [rows] = await db.query('SELECT * FROM ${tab.nome} WHERE ${tab.chave} = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Registro não encontrado' });
+    res.json(rows[0]);
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
 };
 
 const criar = async (req, res) => {
-  const ausentes = faltando(req.body, OBRIGATORIOS_CRIAR);
-
-  if (ausentes.length) {
-    return res.status(400).json({
-      erro: 'Campos obrigatórios ausentes',
-      campos: ausentes
-    });
-  }
-
+  const { ${tab.campos.join(', ')} } = req.body;
   try {
-    const id = await model.criar(req.body);
-
-    res.status(201).json({
-      id,
-      ...req.body
-    });
+    const [result] = await db.query(
+      'INSERT INTO ${tab.nome} (${cols}) VALUES (${placeholders})',
+      [${tab.campos.join(', ')}]
+    );
+    res.status(201).json({ id: result.insertId, ...req.body });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
 };
 
 const atualizar = async (req, res) => {
-  const ausentes = faltando(req.body, OBRIGATORIOS_ATUALIZAR);
-
-  if (ausentes.length) {
-    return res.status(400).json({
-      erro: 'Campos obrigatórios ausentes',
-      campos: ausentes
-    });
-  }
-
+  const { id } = req.params;
+  const { ${tab.campos.join(', ')} } = req.body;
   try {
-    const afetados = await model.atualizar(
-      req.params.id,
-      req.body
+    await db.query(
+      'UPDATE ${tab.nome} SET ${updates} WHERE ${tab.chave} = ?',
+      [${tab.campos.length ? tab.campos.join(', ') + ', ' : ''}id]
     );
-
-    if (!afetados) {
-      return res.status(404).json({
-        erro: 'Registro não encontrado'
-      });
-    }
-
-    res.json({
-      mensagem: 'Atualizado com sucesso'
-    });
+    res.json({ mensagem: 'Atualizado com sucesso' });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
 };
 
-const remover = async (req, res) => {
+const deletar = async (req, res) => {
+  const { id } = req.params;
   try {
-    const afetados = await model.remover(req.params.id);
-
-    if (!afetados) {
-      return res.status(404).json({
-        erro: 'Registro não encontrado'
-      });
-    }
-
-    res.json({
-      mensagem: 'Removido com sucesso'
-    });
+    await db.query('DELETE FROM ${tab.nome} WHERE ${tab.chave} = ?', [id]);
+    res.json({ mensagem: 'Removido com sucesso' });
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
 };
 
-module.exports = {
-  listar,
-  buscarPorId,
-  criar,
-  atualizar,
-  remover
-};
+module.exports = { listar, buscarPorId, criar, atualizar, deletar };
 `;
 }
 
-// Rotas individuais
-function gerarRotaTabela(tab) {
-  return `const express = require('express');
-const router = express.Router();
-const controller = require('../controllers/${tab.nome}');
+function gerarDb(dbName) {
+  return `const mysql = require('mysql2/promise');
 
-router.get('/', controller.listar);
-router.get('/:id', controller.buscarPorId);
-router.post('/', controller.criar);
-router.put('/:id', controller.atualizar);
-router.delete('/:id', controller.remover);
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || '${dbName}',
+  decimalNumbers: true,
+  dateStrings: true
+});
 
-module.exports = router;
+module.exports = pool;
 `;
 }
 
-// Index das rotas
-function gerarRotasIndex(tabelas) {
-  const linhas = tabelas
-    .map((t) =>
-      `router.use('/${t.nome}', require('./${t.nome}'));`
-    )
-    .join('\n');
-
-  return `const express = require('express');
-const router = express.Router();
-
-${linhas}
-
-module.exports = router;
-`;
-}
-
-// Servidor Express
-function gerarServer() {
-  return `const express = require('express');
+const ARQUIVO_SERVER = `const express = require('express');
 const cors = require('cors');
-const routes = require('./routes');
+const routes = require('./src/routes');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 app.use(routes);
 
-// 404 para rotas inexistentes
-app.use((req, res) => {
-  res.status(404).json({
-    erro: 'Rota não encontrada'
-  });
-});
-
-// JSON inválido e demais erros
-app.use((err, req, res, next) => {
-  if (err.type === 'entity.parse.failed') {
-    return res.status(400).json({
-      erro: 'JSON inválido'
-    });
-  }
-
-  res.status(500).json({
-    erro: err.message
-  });
-});
-
-const PORT = 3000;
-
-app.listen(PORT, () => {
-  console.log('Servidor rodando na porta ' + PORT);
+app.listen(3000, () => {
+  console.log('Servidor rodando na porta 3000');
 });
 `;
+
+function gerarInsomnia(dbName, tabelas) {
+  const agora = Date.now();
+  const base = 'http://localhost:3000';
+  const workspaceId = 'wrk_' + dbName;
+  const recursos = [{
+    _id: workspaceId,
+    parentId: null,
+    modified: agora,
+    created: agora,
+    name: `API ${dbName} - StatTrak`,
+    description: 'Coleção gerada automaticamente',
+    scope: 'collection',
+    _type: 'workspace'
+  }];
+
+  const requisicao = (id, pasta, ordem, nome, metodo, url, corpo) => ({
+    _id: id,
+    parentId: pasta,
+    modified: agora,
+    created: agora,
+    url,
+    name: nome,
+    description: '',
+    method: metodo,
+    body: corpo ? { mimeType: 'application/json', text: JSON.stringify(corpo, null, 2) } : {},
+    parameters: [],
+    headers: corpo ? [{ name: 'Content-Type', value: 'application/json' }] : [],
+    authentication: {},
+    metaSortKey: ordem,
+    _type: 'request'
+  });
+
+  tabelas.forEach((tab, i) => {
+    const exemplo = {};
+    tab.colunas.filter(c => !c.autoInc && !c.gerada).forEach(c => { exemplo[c.nome] = valorExemplo(c); });
+
+    const pasta = `fld_${dbName}_${tab.nome}`;
+    const rota = `${base}/${tab.nome}`;
+
+    recursos.push({
+      _id: pasta,
+      parentId: workspaceId,
+      modified: agora,
+      created: agora,
+      name: tab.nome.toUpperCase(),
+      description: `Rotas CRUD para a tabela ${tab.nome}`,
+      environment: {},
+      environmentPropertyOrder: null,
+      metaSortKey: -1000 * (tabelas.length - i),
+      _type: 'request_group'
+    });
+    recursos.push(requisicao(`req_${tab.nome}_listar`, pasta, -5, `Listar ${tab.nome}`, 'GET', rota));
+    recursos.push(requisicao(`req_${tab.nome}_buscar`, pasta, -4, `Buscar ${tab.nome} por id`, 'GET', `${rota}/1`));
+    recursos.push(requisicao(`req_${tab.nome}_criar`, pasta, -3, `Criar ${tab.nome}`, 'POST', rota, exemplo));
+    recursos.push(requisicao(`req_${tab.nome}_atualizar`, pasta, -2, `Atualizar ${tab.nome}`, 'PUT', `${rota}/1`, exemplo));
+    recursos.push(requisicao(`req_${tab.nome}_deletar`, pasta, -1, `Deletar ${tab.nome}`, 'DELETE', `${rota}/1`));
+  });
+
+  return {
+    _type: 'export',
+    __export_format: 4,
+    __export_date: new Date().toISOString(),
+    __export_source: 'Otimizador StatTrak v1.1',
+    resources: recursos
+  };
 }
 
-// ---------- Função principal ----------
+/* ---------- 3. Botão "Gerar back-end" ---------- */
+
+function paraBase64(texto) {
+  const bytes = new TextEncoder().encode(texto);
+  let binario = '';
+  bytes.forEach(b => { binario += String.fromCharCode(b); });
+  return btoa(binario);
+}
 
 function gerarBackend() {
+  const saida = document.getElementById('terminal-output');
+  const secao = document.getElementById('output-section');
   const sql = document.getElementById('sql-input').value.trim();
 
   if (!sql) {
@@ -464,138 +367,81 @@ function gerarBackend() {
     return;
   }
 
-  // 1. Nome do banco
-  const dbMatch = sql.match(
-    /CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([a-zA-Z0-9_]+)`?/i
-  );
-
-  const dbName = dbMatch ? dbMatch[1] : 'meu_banco';
-
-  // 2. Extração das tabelas
-  const todas = extrairTabelas(sql);
-
-  const tabelas = todas.filter(
-    (t) =>
-      t.insertaveis.length > 0 &&
-      t.atualizaveis.length > 0
-  );
-
-  const ignoradas = todas
-    .filter((t) => !tabelas.includes(t))
-    .map((t) => t.nome);
-
-  if (ignoradas.length) {
-    console.warn(
-      'Tabelas ignoradas (sem colunas para inserir/atualizar):',
-      ignoradas.join(', ')
-    );
-  }
+  const dbName = extrairNomeBanco(sql);
+  const tabelas = extrairTabelas(sql);
 
   if (tabelas.length === 0) {
-    alert(
-      'Nenhuma instrução CREATE TABLE utilizável encontrada no SQL.'
-    );
+    alert('Nenhuma instrução CREATE TABLE válida encontrada no SQL.');
     return;
   }
 
-  // 3. Geração dos arquivos
   const arquivos = {};
+  arquivos['db/script.sql'] = sql;
+  arquivos['docs/der_energia.sql'] = sql;
+  arquivos['src/db.js'] = gerarDb(dbName);
 
-  arquivos['config/script.sql'] = sql;
-  arquivos['config/db.js'] = gerarConfigDb(dbName);
-
-  tabelas.forEach((tab) => {
-    arquivos['models/' + tab.nome + '.js'] = gerarModel(tab);
-
-    arquivos['controllers/' + tab.nome + '.js'] =
-      gerarController(tab);
-
-    arquivos['routes/' + tab.nome + '.js'] =
-      gerarRotaTabela(tab);
+  let importsRoutes = `const express = require('express');\nconst router = express.Router();\n\n`;
+  tabelas.forEach(tab => {
+    arquivos[`src/controllers/${tab.nome}.js`] = gerarController(tab);
+    importsRoutes += `const ${tab.nome}Controller = require('./controllers/${tab.nome}');\n`;
+    importsRoutes += `router.get('/${tab.nome}', ${tab.nome}Controller.listar);\n`;
+    importsRoutes += `router.get('/${tab.nome}/:id', ${tab.nome}Controller.buscarPorId);\n`;
+    importsRoutes += `router.post('/${tab.nome}', ${tab.nome}Controller.criar);\n`;
+    importsRoutes += `router.put('/${tab.nome}/:id', ${tab.nome}Controller.atualizar);\n`;
+    importsRoutes += `router.delete('/${tab.nome}/:id', ${tab.nome}Controller.deletar);\n\n`;
   });
+  importsRoutes += `module.exports = router;`;
 
-  arquivos['routes/index.js'] = gerarRotasIndex(tabelas);
-  arquivos['server.js'] = gerarServer();
+  arquivos['src/routes.js'] = importsRoutes;
+  arquivos['server.js'] = ARQUIVO_SERVER;
+  arquivos['.gitignore'] = 'node_modules\npackage-lock.json\n';
+  arquivos['insomnia.json'] = JSON.stringify(gerarInsomnia(dbName, tabelas), null, 2);
 
-  arquivos['.gitignore'] =
-    'node_modules\npackage-lock.json\n.env\n';
-
-  // 4. Comando PowerShell
-  let ps =
-    'New-Item -ItemType Directory -Force -Path config,controllers,models,routes | Out-Null; ';
-
-  ps += 'npm init -y | Out-Null; ';
-
-  ps +=
-    'function W($p,$b){[IO.File]::WriteAllBytes((Join-Path $PWD $p),[Convert]::FromBase64String($b))}; ';
+  const linhas = [];
+  linhas.push('mkdir db, docs, src, src\\controllers -Force | Out-Null');
+  linhas.push('npm init -y | Out-Null');
 
   for (const [caminho, conteudo] of Object.entries(arquivos)) {
     const alvo = caminho.replace(/\//g, '\\');
-
-    const chamada =
-      "W '" + alvo + "' '" + paraBase64(conteudo) + "'; ";
-
-    ps += chamada;
+    linhas.push(`[IO.File]::WriteAllBytes("$PWD\\${alvo}", [Convert]::FromBase64String("${paraBase64(conteudo)}"))`);
   }
 
-  ps +=
-    'npm pkg set scripts.start="node server.js"; ';
+  linhas.push('npm pkg set scripts.start="node server.js"');
+  linhas.push('npm pkg set scripts.dev="node --watch server.js"');
+  linhas.push('npm install express cors mysql2');
+  linhas.push('Write-Host "Back-end gerado com sucesso na estrutura solicitada! Rode npm run dev para iniciar." -ForegroundColor Green');
 
-  ps +=
-    'npm pkg set scripts.dev="node --watch server.js"; ';
+  saida.textContent = linhas.join('\n');
+  secao.style.display = 'flex';
 
-  ps +=
-    'npm install express cors mysql2; ';
-
-  ps +=
-    "Write-Host \"Back-end gerado com sucesso! Rode 'npm run dev' para iniciar.\" -ForegroundColor Green";
-
-  ultimoComando = ps;
-
-  document.getElementById('terminal-output').textContent = ps;
-
-  document.getElementById('output-section').style.display = 'flex';
+  const botao = document.getElementById('btn-copy');
+  if (botao) botao.textContent = 'Copiar Comando';
 }
 
-// ---------- Ações da interface ----------
+/* ---------- 4. Botão "Copiar Comando" ---------- */
 
 async function copiarComando() {
-  const texto =
-    document.getElementById('terminal-output').textContent;
+  const texto = document.getElementById('terminal-output').textContent;
+  const botao = document.getElementById('btn-copy');
+  if (!texto) return;
 
-  const btn = document.getElementById('btn-copy');
-
+  let copiou = false;
   try {
     await navigator.clipboard.writeText(texto);
-    btn.textContent = 'Copiado!';
-  } catch (err) {
-    btn.textContent = 'Falha ao copiar';
+    copiou = true;
+  } catch (e) {
+    const area = document.createElement('textarea');
+    area.value = texto;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try { copiou = document.execCommand('copy'); } catch (e2) { copiou = false; }
+    document.body.removeChild(area);
   }
 
-  setTimeout(
-    () => (btn.textContent = 'Copiar Comando'),
-    2000
-  );
-}
-
-// Baixar script PowerShell
-function baixarScript() {
-  if (!ultimoComando) {
-    alert('Gere o back-end primeiro!');
-    return;
+  if (botao) {
+    botao.textContent = copiou ? 'Copiado!' : 'Falhou — selecione manualmente';
+    setTimeout(() => { botao.textContent = 'Copiar Comando'; }, 2000);
   }
-
-  const blob = new Blob(
-    [ultimoComando],
-    { type: 'text/plain;charset=utf-8' }
-  );
-
-  const a = document.createElement('a');
-
-  a.href = URL.createObjectURL(blob);
-  a.download = 'gerar-backend.ps1';
-
-  a.click();
-
-  URL.revokeObjectURL(a.href);
 }

@@ -1,4 +1,3 @@
-
 :root {
   --fundo: #0d1117;
   --superficie: #161b22;
@@ -102,7 +101,11 @@ textarea:focus {
   border-radius: 8px;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.btn:active {
+  transform: scale(0.98);
 }
 
 .btn-primario {
